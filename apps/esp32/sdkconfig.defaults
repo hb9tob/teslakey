@@ -1,0 +1,38 @@
+# teslakey - reglages par defaut
+#
+# Valables pour ESP32 classique (WROOM, Heltec) comme pour C3/S3.
+
+# --- Bluetooth : NimBLE en role central uniquement ---
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=n
+
+# Une seule connexion suffit (le vehicule).
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+
+# MTU demande. L'ESP32 classique est en BLE 4.2 et le vehicule reste
+# souvent a 23, d'ou le decoupage en blocs de 20 octets ; sur C3/S3 la
+# negociation peut aboutir plus haut.
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247
+
+# Pas d'appairage BLE : l'authentification se fait dans la couche
+# applicative Tesla (ECDH P-256), pas au niveau du lien.
+CONFIG_BT_NIMBLE_SM_LEGACY=n
+CONFIG_BT_NIMBLE_SM_SC=n
+
+# --- mbedTLS : les primitives dont le coeur a besoin ---
+CONFIG_MBEDTLS_ECP_C=y
+CONFIG_MBEDTLS_ECDH_C=y
+CONFIG_MBEDTLS_ECP_DP_SECP256R1_ENABLED=y
+CONFIG_MBEDTLS_GCM_C=y
+CONFIG_MBEDTLS_SHA256_C=y
+# SHA-1 sert de fonction de derivation sur le secret ECDH (cf. PROTOCOL.md
+# section 2) : il est indispensable, meme si l'usage en est restreint.
+CONFIG_MBEDTLS_SHA1_C=y
+
+# --- Divers ---
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

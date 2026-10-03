@@ -1,0 +1,23 @@
+menu "teslakey"
+
+config TESLAKEY_BUTTON_GPIO
+    int "GPIO du bouton"
+    default 0
+    range 0 48
+    help
+      Broche du bouton de declenchement, active a l'etat bas.
+      GPIO 0 correspond au bouton BOOT sur la plupart des cartes
+      ESP32 (WROOM DevKit, Heltec WiFi Kit 32, WiFi LoRa 32).
+
+config TESLAKEY_VIN
+    string "VIN du vehicule (17 caracteres)"
+    default "5YJ3E1EA7JF000000"
+    help
+      VIN utilise au demarrage si aucun n'a encore ete enregistre en
+      memoire non volatile. La commande 'vin' de la console le remplace
+      et le rend persistant.
+
+      Le VIN sert a deux choses : deriver le nom BLE recherche
+      (SHA1 du VIN) et personnaliser les signatures des commandes.
+
+endmenu

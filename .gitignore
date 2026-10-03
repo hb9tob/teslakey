@@ -1,0 +1,35 @@
+# --- Binaires et objets de test ---
+tests/tk_tests
+tests/tk_tests.exe
+tests/tk_tests_mbedtls
+tests/tk_tests_mbedtls.exe
+*.o
+*.obj
+*.plist
+
+# --- PlatformIO ---
+# .pio contient le framework ESP-IDF et les toolchains : ~455 Mo.
+.pio/
+.pioenvs/
+.piolibdeps/
+.vscode/ipch/
+
+# --- ESP-IDF ---
+build/
+# sdkconfig.defaults est versionne (c'est la configuration du projet) ;
+# les sdkconfig generes par carte ne le sont pas.
+sdkconfig
+sdkconfig.old
+sdkconfig.esp32*
+sdkconfig.heltec*
+managed_components/
+dependencies.lock
+
+# --- Zephyr / west ---
+twister-out/
+.west/
+
+# --- Divers ---
+*.swp
+*~
+Thumbs.db
