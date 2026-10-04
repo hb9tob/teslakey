@@ -52,6 +52,42 @@ alors chaque bloc TX/RX en hexadécimal.
 
 ---
 
+## 2 bis. Clé à boutons, endormie entre deux usages — étape 1
+
+Écrit le 4 octobre 2026 dans `apps/esp32/main/` (`main.c`, `power.c`) : la
+carte dort en sommeil profond, un appui la réveille, elle fait son cycle et
+se rendort. Gestes, LED et délais sont décrits dans le README.
+
+Le geste est lu par un *wake stub* (`esp_wake_deep_sleep` dans
+`power.c`), avant le redémarrage : un double ou triple appui rapide ne
+peut plus perdre un appui pendant le démarrage.
+
+Vérifié sur le banc, par la console : démarrage à froid prêt en ≈ 0,5 s,
+sommeil sur la commande `sleep`, sommeil automatique 60 s après un reset.
+Réveil par minuterie (`sleep 3`) : le stub s'exécute, attend ses 0,43 s
+(30 ms d'anti-rebond + 400 ms de guet d'un appui suivant, donc ses délais
+sont justes) et lit bien les boutons comme relâchés.
+
+- [ ] **Réveil par bouton** (PRG et bouton externe sur GPIO 6) et
+      reconnaissance des gestes : jamais essayés, il faut une main. Le
+      stub n'a été vu que boutons relâchés ; le journal de démarrage
+      affiche ce qu'il a lu (`stub de reveil : N appui(s)`).
+- [ ] Les quatre gestes à la voiture, puis ouvrir → coffre enchaînés dans
+      la fenêtre de 5 s.
+- [ ] **Courant en sommeil, sur batterie, USB débranché.** Si la radio
+      LoRa ne s'endort pas (`sx1262_sleep` dans `power.c`, écrit sans
+      pouvoir le mesurer), on lira ~0,6 mA au lieu de quelques dizaines
+      de µA.
+- [ ] Raccourcir le réveil : la clé publique est recalculée à chaque
+      démarrage (≈ 150 ms, à persister en NVS) et le journal série au
+      niveau INFO coûte aussi.
+- [ ] Reporter les gestes sur l'application nRF.
+
+**Étape 2, ensuite :** l'entrée passive, à partir de la partie
+rétro-ingéniée du protocole. Rien n'est commencé.
+
+---
+
 ## 3. Non vérifié à ce jour
 
 - [ ] **HAL nRF (`hal/nrf/`) : jamais compilé.** Le nRF Connect SDK n'est

@@ -1,13 +1,63 @@
 menu "teslakey"
 
 config TESLAKEY_BUTTON_GPIO
-    int "GPIO du bouton"
+    int "GPIO du bouton principal"
     default 0
     range 0 48
     help
       Broche du bouton de declenchement, active a l'etat bas.
       GPIO 0 correspond au bouton BOOT sur la plupart des cartes
       ESP32 (WROOM DevKit, Heltec WiFi Kit 32, WiFi LoRa 32).
+
+config TESLAKEY_EXT_BUTTON_GPIO
+    int "GPIO du bouton externe (-1 : aucun)"
+    default 6 if IDF_TARGET_ESP32S3
+    default -1
+    range -1 48
+    help
+      Second bouton, a cabler entre cette broche et GND : le tirage au
+      niveau haut est interne. Il porte les memes gestes que le bouton
+      principal et reveille lui aussi la carte.
+
+      La broche doit pouvoir reveiller la puce du sommeil profond : une
+      broche RTC (0 a 21 sur ESP32-S3). GPIO 6 est libre sur le
+      connecteur du Heltec WiFi LoRa 32 V3. Sur ESP32 classique, seul le
+      bouton principal reveille la carte.
+
+config TESLAKEY_LED_GPIO
+    int "GPIO de la LED d'etat (-1 : aucune)"
+    default -1
+    range -1 48
+    help
+      LED allumee a l'etat haut. Scintillement : cycle en cours ; fixe
+      1,5 s : accepte ; trois eclats : echec ; clignotement lent :
+      appairage, carte NFC attendue.
+
+config TESLAKEY_AWAKE_AFTER_ACTION_MS
+    int "Eveil apres une action (ms)"
+    default 5000
+    range 500 600000
+    help
+      Delai avant le sommeil profond une fois la derniere action
+      terminee. Le lien reste etabli pendant ce temps : un second geste
+      part sans refaire le scan.
+
+config TESLAKEY_AWAKE_AFTER_RESET_S
+    int "Eveil apres une mise sous tension ou un reset (s)"
+    default 60
+    range 5 3600
+    help
+      Laisse le temps d'utiliser la console serie. Chaque ligne tapee
+      relance ce delai.
+
+config TESLAKEY_BOARD_HELTEC_V3
+    bool "Carte Heltec WiFi LoRa 32 V3"
+    depends on IDF_TARGET_ESP32S3
+    default n
+    help
+      Avant le sommeil, coupe l'alimentation Vext (ecran) et endort la
+      radio LoRa SX1262, qui consommerait sinon bien plus que l'ESP32
+      endormi.
 
 config TESLAKEY_VIN
     string "VIN du vehicule (17 caracteres)"

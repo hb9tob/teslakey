@@ -37,6 +37,12 @@ CONFIG_MBEDTLS_SHA1_C=y
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
+# --- Reveil du sommeil profond ---
+# Chaque appui de bouton est un redemarrage : on ne revalide pas l'image
+# et le bootloader se tait, le journal serie coutant des millisecondes.
+CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP=y
+CONFIG_BOOTLOADER_LOG_LEVEL_ERROR=y
+
 # La crypto P-256 du handshake tourne dans la tache hote NimBLE : 4 Ko
 # debordent (constate sur vehicule : mutex de la pile BLE ecrase).
 CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192

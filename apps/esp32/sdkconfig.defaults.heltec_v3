@@ -1,0 +1,10 @@
+# teslakey - reglages propres au Heltec WiFi LoRa 32 V3 (ESP32-S3)
+#
+# S'ajoute a sdkconfig.defaults. PlatformIO le prend pour l'environnement
+# heltec_wifi_lora_32_V3 ; avec idf.py :
+#   idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.heltec_v3" build
+
+CONFIG_TESLAKEY_BOARD_HELTEC_V3=y
+
+# LED blanche de la carte.
+CONFIG_TESLAKEY_LED_GPIO=35

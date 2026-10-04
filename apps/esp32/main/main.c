@@ -1,31 +1,43 @@
 /*
  * teslakey — application ESP32
  *
+ * La carte dort en sommeil profond. Un appui la reveille, elle fait un
+ * cycle scan -> connexion -> commande, signale le resultat par la LED et
+ * se rendort.
+ *
  * Deux declencheurs :
- *   - un bouton (GPIO 0 par defaut, celui du bouton BOOT sur la plupart
- *     des cartes WROOM et Heltec) : appui court = ouvrir, appui long =
- *     ouvrir et autoriser la conduite ;
- *   - la console serie, pour l'appairage initial et le diagnostic.
+ *   - les boutons (GPIO 0, le bouton BOOT/PRG de la plupart des cartes, et
+ *     un bouton externe optionnel entre sa broche et GND), qui portent les
+ *     memes gestes :
+ *         appui court    ouvrir et autoriser la conduite
+ *         double appui   verrouiller
+ *         triple appui   demander l'appairage
+ *         appui long     coffre
+ *   - la console serie, pour le diagnostic. Elle reste ouverte une minute
+ *     apres une mise sous tension ou un reset.
  *
  * Premiere mise en service :
- *   1. flasher, ouvrir le moniteur serie
- *   2. taper :  vin 5YJ3E1EA7JF000000
- *   3. taper :  pair
- *   4. poser la carte NFC Tesla sur la console centrale, confirmer a
+ *   1. renseigner le VIN (secrets/tk_secrets.h, ou 'vin ...' en console)
+ *   2. dans la voiture : triple appui, la LED clignote lentement
+ *   3. poser la carte NFC Tesla sur la console centrale, confirmer a
  *      l'ecran
- *   5. le bouton est operationnel
+ *   4. la LED reste allumee 1,5 s : les boutons sont operationnels
  */
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "teslakey/tk_client.h"
 #include "teslakey/tk_err.h"
 
+#include "power.h"
 #include "tk_hal_esp32.h"
 
 /* Le vrai VIN vit dans secrets/tk_secrets.h, hors du depot. A defaut on
@@ -41,11 +53,25 @@
 
 static const char *TAG = "app";
 
-/* Bouton. GPIO 0 est le bouton BOOT sur la majorite des cartes ESP32
- * (WROOM DevKit, Heltec WiFi Kit 32 / WiFi LoRa 32). */
-#define BUTTON_GPIO        CONFIG_TESLAKEY_BUTTON_GPIO
-#define LONG_PRESS_MS      800
-#define DEBOUNCE_MS        40
+/* Boutons, actifs a l'etat bas. GPIO 0 est le bouton BOOT/PRG sur la
+ * majorite des cartes ESP32 (WROOM DevKit, Heltec WiFi Kit 32 / WiFi LoRa
+ * 32) ; le second est un bouton externe, absent si sa broche vaut -1. */
+static const int s_buttons[] = {
+    CONFIG_TESLAKEY_BUTTON_GPIO,
+    CONFIG_TESLAKEY_EXT_BUTTON_GPIO,
+};
+#define BUTTON_COUNT       (sizeof(s_buttons) / sizeof(s_buttons[0]))
+
+#define LONG_PRESS_MS      POWER_LONG_PRESS_MS
+#define DEBOUNCE_MS        POWER_DEBOUNCE_MS
+#define MULTI_GAP_MS       POWER_MULTI_GAP_MS
+#define BUTTON_POLL_MS     10
+
+/* Duree d'eveil apres une action, et apres un demarrage a froid. */
+#define AWAKE_AFTER_ACTION_MS \
+    ((uint32_t)CONFIG_TESLAKEY_AWAKE_AFTER_ACTION_MS)
+#define AWAKE_AFTER_RESET_MS \
+    ((uint32_t)CONFIG_TESLAKEY_AWAKE_AFTER_RESET_S * 1000u)
 
 /* Le client doit etre statique : le HAL en garde le pointeur. */
 static tk_client s_client;
@@ -63,6 +89,33 @@ typedef enum {
 } request_t;
 
 static volatile request_t s_request;
+
+/* Les trois compteurs qui suivent ne sont touches que sous le verrou du
+ * HAL : par la tache principale, ou par les rappels du coeur. */
+static int s_pending;       /* actions en file ou en cours */
+static int s_failed;        /* l'une d'elles a echoue */
+static int s_pairing;       /* un appairage a ete demande */
+
+static volatile uint8_t  s_button_busy;   /* geste en cours de lecture */
+static volatile uint8_t  s_stay_awake;    /* commande 'awake' */
+static volatile uint8_t  s_sleep_now;     /* commande 'sleep' */
+static volatile uint32_t s_sleep_timer_s; /* 'sleep <s>' : reveil minute */
+static volatile uint32_t s_awake_until;   /* echeance de sommeil, en ms */
+
+static uint32_t uptime_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+/* Repousse le sommeil d'au moins ms millisecondes. */
+static void keep_awake(uint32_t ms)
+{
+    uint32_t until = uptime_ms() + ms;
+
+    if ((int32_t)(until - s_awake_until) > 0) {
+        s_awake_until = until;
+    }
+}
 
 /* ------------------------------------------------------------------ */
 /* Rappels du coeur                                                    */
@@ -86,12 +139,21 @@ static void on_state(void *user, tk_state st)
 {
     (void)user;
     ESP_LOGI(TAG, "etat : %s", state_name(st));
+    if (st == TK_STATE_ENROLLING) {
+        power_led_set(POWER_LED_PAIRING);
+    }
 }
 
 static void on_ready(void *user)
 {
     (void)user;
     ESP_LOGI(TAG, "session authentifiee avec le vehicule");
+    if (s_pairing) {
+        /* La cle vient d'etre acceptee par le vehicule. */
+        s_pairing = 0;
+        power_led_set(POWER_LED_OK);
+        keep_awake(AWAKE_AFTER_ACTION_MS);
+    }
 }
 
 static void on_action_done(void *user, tk_action action, int err)
@@ -108,65 +170,173 @@ static void on_action_done(void *user, tk_action action, int err)
         ESP_LOGI(TAG, "%s : accepte", name);
     } else {
         ESP_LOGW(TAG, "%s : %s", name, tk_strerror(err));
+        s_failed = 1;
     }
+
+    /* Le resultat affiche est celui de l'ensemble du geste : "ouvrir et
+     * conduire" ne vaut succes que si les deux sont acceptes. */
+    if (s_pending > 0 && --s_pending == 0) {
+        power_led_set(s_failed ? POWER_LED_FAIL : POWER_LED_OK);
+        s_failed = 0;
+    }
+    keep_awake(AWAKE_AFTER_ACTION_MS);
 }
 
 static void on_not_whitelisted(void *user)
 {
     (void)user;
     ESP_LOGW(TAG, "cette cle n'est pas appairee avec le vehicule.");
-    ESP_LOGW(TAG, "tapez 'pair' puis posez votre carte NFC Tesla sur la "
-                  "console centrale.");
+    ESP_LOGW(TAG, "triple appui (ou 'pair'), puis posez votre carte NFC "
+                  "Tesla sur la console centrale.");
+    s_pending = 0;
+    s_failed  = 0;
+    power_led_set(POWER_LED_FAIL);
 }
 
 static void on_error(void *user, int err)
 {
     (void)user;
     ESP_LOGW(TAG, "cycle interrompu : %s", tk_strerror(err));
+    s_pairing = 0;
+    power_led_set(POWER_LED_FAIL);
 }
 
 /* ------------------------------------------------------------------ */
-/* Bouton                                                              */
+/* Boutons                                                             */
 /* ------------------------------------------------------------------ */
+
+static int button_down(void)
+{
+    size_t i;
+
+    for (i = 0; i < BUTTON_COUNT; i++) {
+        if (s_buttons[i] >= 0 && gpio_get_level(s_buttons[i]) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void button_delay(uint32_t ms)
+{
+    vTaskDelay(pdMS_TO_TICKS(ms));
+}
+
+static void emit_gesture(int clicks, int is_long)
+{
+    if (is_long) {
+        ESP_LOGI(TAG, "appui long : coffre");
+        s_request = REQ_TRUNK;
+    } else if (clicks == 1) {
+        ESP_LOGI(TAG, "appui court : ouvrir et demarrer");
+        s_request = REQ_UNLOCK_AND_DRIVE;
+    } else if (clicks == 2) {
+        ESP_LOGI(TAG, "double appui : verrouiller");
+        s_request = REQ_LOCK;
+    } else {
+        ESP_LOGI(TAG, "triple appui : appairage");
+        s_request = REQ_PAIR;
+    }
+}
+
+/* Ce que la tache des boutons trouve en demarrant. */
+#define BUTTONS_COLD        0   /* rien en cours */
+#define BUTTONS_WOKE        1   /* reveil : le geste en cours est a lire */
+#define BUTTONS_WOKE_READ   2   /* reveil : le stub a deja lu le geste */
 
 static void button_task(void *arg)
 {
+    int start = (int)(intptr_t)arg;
+
+    if (start == BUTTONS_WOKE_READ) {
+        /* Un appui long est encore tenu : ce n'est pas un nouveau geste. */
+        while (button_down()) {
+            button_delay(BUTTON_POLL_MS);
+        }
+        button_delay(DEBOUNCE_MS);
+        s_button_busy = 0;
+    }
+
+    for (;;) {
+        int      clicks  = 0;
+        int      is_long = 0;
+        int      woke    = (start == BUTTONS_WOKE);
+        /* Sans stub, le temps de demarrage compte dans la duree d'appui,
+         * et l'appui du reveil peut deja etre relache. */
+        uint32_t held    = woke ? uptime_ms() : 0;
+
+        start = BUTTONS_COLD;
+        if (!woke) {
+            while (!button_down()) {
+                button_delay(BUTTON_POLL_MS);
+            }
+            s_button_busy = 1;
+            button_delay(DEBOUNCE_MS);
+            if (!button_down()) {
+                s_button_busy = 0;
+                continue;   /* rebond */
+            }
+        }
+
+        for (;;) {
+            uint32_t waited = 0;
+
+            while (button_down() && held < LONG_PRESS_MS) {
+                button_delay(BUTTON_POLL_MS);
+                held += BUTTON_POLL_MS;
+            }
+            if (held >= LONG_PRESS_MS && clicks == 0) {
+                is_long = 1;
+                break;
+            }
+            while (button_down()) {
+                button_delay(BUTTON_POLL_MS);
+            }
+            clicks++;
+            if (clicks >= 3) {
+                break;
+            }
+
+            /* Un autre appui suit-il ? */
+            button_delay(DEBOUNCE_MS);
+            while (!button_down() && waited < MULTI_GAP_MS) {
+                button_delay(BUTTON_POLL_MS);
+                waited += BUTTON_POLL_MS;
+            }
+            if (!button_down()) {
+                break;
+            }
+            button_delay(DEBOUNCE_MS);
+            held = 0;
+        }
+
+        emit_gesture(clicks, is_long);
+
+        /* Evite de reenchainer sur le meme appui. */
+        while (button_down()) {
+            button_delay(BUTTON_POLL_MS);
+        }
+        button_delay(DEBOUNCE_MS);
+        s_button_busy = 0;
+    }
+}
+
+static void buttons_init(void)
+{
     gpio_config_t cfg = {
-        .pin_bit_mask = 1ULL << BUTTON_GPIO,
         .mode         = GPIO_MODE_INPUT,
         .pull_up_en   = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type    = GPIO_INTR_DISABLE,
     };
+    size_t i;
 
-    (void)arg;
-    ESP_ERROR_CHECK(gpio_config(&cfg));
-
-    for (;;) {
-        /* Bouton actif a l'etat bas (tire au niveau haut au repos). */
-        if (gpio_get_level(BUTTON_GPIO) == 0) {
-            uint32_t held = 0;
-
-            vTaskDelay(pdMS_TO_TICKS(DEBOUNCE_MS));
-            if (gpio_get_level(BUTTON_GPIO) != 0) {
-                continue;   /* rebond */
-            }
-            while (gpio_get_level(BUTTON_GPIO) == 0 && held < 5000) {
-                vTaskDelay(pdMS_TO_TICKS(20));
-                held += 20;
-            }
-            if (held >= LONG_PRESS_MS) {
-                ESP_LOGI(TAG, "appui long : ouvrir et demarrer");
-                s_request = REQ_UNLOCK_AND_DRIVE;
-            } else {
-                ESP_LOGI(TAG, "appui court : ouvrir");
-                s_request = REQ_UNLOCK;
-            }
-            /* Evite de reenchainer sur le meme appui. */
-            vTaskDelay(pdMS_TO_TICKS(200));
+    for (i = 0; i < BUTTON_COUNT; i++) {
+        if (s_buttons[i] >= 0) {
+            cfg.pin_bit_mask |= 1ULL << s_buttons[i];
         }
-        vTaskDelay(pdMS_TO_TICKS(30));
     }
+    ESP_ERROR_CHECK(gpio_config(&cfg));
 }
 
 /* ------------------------------------------------------------------ */
@@ -185,13 +355,28 @@ static void print_help(void)
            "  frunk                ouvre le coffre avant\n"
            "  chargeport           ouvre le port de charge\n"
            "  status               affiche l'etat courant\n"
+           "  sleep [s]            dort tout de suite ; avec une duree, se\n"
+           "                       reveille seul apres s secondes (banc)\n"
+           "  awake                reste eveille jusqu'au prochain reset\n"
            "  help                 cette aide\n\n");
 }
 
 static void handle_line(char *line)
 {
+    /* Tant qu'on tape, on ne dort pas. */
+    keep_awake(AWAKE_AFTER_RESET_MS);
+
     if (strcmp(line, "help") == 0) {
         print_help();
+    } else if (strcmp(line, "sleep") == 0 ||
+               strncmp(line, "sleep ", 6) == 0) {
+        s_sleep_timer_s = (line[5] == ' ')
+                              ? (uint32_t)strtoul(line + 6, NULL, 10) : 0;
+        s_stay_awake    = 0;
+        s_sleep_now     = 1;
+    } else if (strcmp(line, "awake") == 0) {
+        s_stay_awake = 1;
+        printf("eveil permanent. 'sleep' pour dormir.\n");
     } else if (strncmp(line, "vin ", 4) == 0) {
         tk_hal_esp32_lock();
         {
@@ -262,50 +447,71 @@ static void console_task(void *arg)
 /* Programme principal                                                 */
 /* ------------------------------------------------------------------ */
 
+/* Met une action en file et la compte, pour savoir quand le geste est
+ * entierement traite. */
+static void queue_action(tk_action action)
+{
+    /* Compte avant l'appel : si la session est prete, l'action part
+     * aussitot et son rappel de fin peut arriver avant le retour. */
+    s_pending++;
+    if (tk_client_queue(&s_client, action) != TK_OK) {
+        s_pending--;
+        s_failed = 1;
+    }
+}
+
 /* Traite une demande utilisateur. Si le lien n'est pas etabli, on lance
  * un cycle : les actions mises en file partiront des que la session sera
  * authentifiee. */
 static void service_request(request_t req)
 {
-    tk_state st = tk_client_state(&s_client);
+    keep_awake(AWAKE_AFTER_ACTION_MS);
 
     switch (req) {
     case REQ_PAIR: {
         int rc = tk_client_enroll(&s_client, TK_ROLE_DRIVER);
 
         if (rc == TK_OK) {
+            s_pairing = 1;
+            power_led_set(POWER_LED_PAIRING);
             printf("Appairage lance. Des l'etat 'appairage', posez votre "
                    "carte NFC Tesla sur la console centrale.\n");
         } else {
+            power_led_set(POWER_LED_FAIL);
             printf("appairage impossible : %s\n", tk_strerror(rc));
         }
         return;
     }
 
     case REQ_UNLOCK:
-        (void)tk_client_queue(&s_client, TK_ACTION_UNLOCK);
+        queue_action(TK_ACTION_UNLOCK);
         break;
     case REQ_LOCK:
-        (void)tk_client_queue(&s_client, TK_ACTION_LOCK);
+        queue_action(TK_ACTION_LOCK);
         break;
     case REQ_UNLOCK_AND_DRIVE:
-        (void)tk_client_unlock_and_drive(&s_client);
+        queue_action(TK_ACTION_UNLOCK);
+        queue_action(TK_ACTION_REMOTE_DRIVE);
         break;
     case REQ_TRUNK:
-        (void)tk_client_queue(&s_client, TK_ACTION_OPEN_TRUNK);
+        queue_action(TK_ACTION_OPEN_TRUNK);
         break;
     case REQ_FRUNK:
-        (void)tk_client_queue(&s_client, TK_ACTION_OPEN_FRUNK);
+        queue_action(TK_ACTION_OPEN_FRUNK);
         break;
     case REQ_CHARGE_PORT:
-        (void)tk_client_queue(&s_client, TK_ACTION_OPEN_CHARGE_PORT);
+        queue_action(TK_ACTION_OPEN_CHARGE_PORT);
         break;
     default:
         return;
     }
 
+    if (s_pending > 0 && !power_led_playing()) {
+        power_led_set(POWER_LED_BUSY);
+    }
+
     /* Les actions sont en file ; il faut un lien pour les emettre. */
-    if (st == TK_STATE_IDLE) {
+    if (tk_client_state(&s_client) == TK_STATE_IDLE) {
         int rc = tk_client_start(&s_client);
         if (rc != TK_OK) {
             printf("demarrage impossible : %s\n", tk_strerror(rc));
@@ -313,13 +519,70 @@ static void service_request(request_t req)
     }
 }
 
+/* Vrai quand plus rien n'est en cours : ni geste, ni commande, ni motif
+ * de LED. A appeler sous le verrou du HAL. */
+static int app_idle(void)
+{
+    tk_state st = tk_client_state(&s_client);
+
+    return (st == TK_STATE_IDLE || st == TK_STATE_READY) &&
+           s_pending == 0 && s_request == REQ_NONE && !s_button_busy &&
+           !power_led_playing();
+}
+
+/* Coupe le lien et endort la carte jusqu'au prochain appui. */
+static void go_to_sleep(void)
+{
+    ESP_LOGI(TAG, "sommeil profond, reveil par bouton");
+
+    tk_hal_esp32_lock();
+    tk_client_stop(&s_client);
+    tk_hal_esp32_unlock();
+
+    /* Laisse partir la fin de connexion : le vehicule libere ainsi sa
+     * place tout de suite, sans attendre l'expiration du lien. */
+    vTaskDelay(pdMS_TO_TICKS(300));
+
+    power_sleep(s_sleep_timer_s);
+
+    /* power_sleep() n'est revenu que faute de source de reveil. */
+    s_stay_awake = 1;
+}
+
 void app_main(void)
 {
     tk_hal       hal;
     tk_client_cb cb;
     int          rc;
+    int          woke;
+    int          buttons = BUTTONS_COLD;
 
-    ESP_LOGI(TAG, "teslakey");
+    power_init(s_buttons, BUTTON_COUNT);
+    woke = power_woke_by_button();
+
+    buttons_init();
+    if (woke) {
+        int clicks  = 0;
+        int is_long = 0;
+
+        power_led_set(POWER_LED_BUSY);
+        s_button_busy = 1;
+        if (power_wake_gesture(&clicks, &is_long)) {
+            /* Le stub de reveil a lu le geste avant le redemarrage. */
+            emit_gesture(clicks, is_long);
+            buttons = BUTTONS_WOKE_READ;
+        } else {
+            /* Pas de stub sur cette cible : la tache lit ce qu'il reste
+             * du geste, d'ou son demarrage avant la pile BLE. */
+            buttons = BUTTONS_WOKE;
+        }
+    }
+    keep_awake(woke ? AWAKE_AFTER_ACTION_MS : AWAKE_AFTER_RESET_MS);
+    (void)xTaskCreate(button_task, "button", 3072,
+                      (void *)(intptr_t)buttons, 5, NULL);
+
+    ESP_LOGI(TAG, "teslakey (%s)", woke ? "reveil par bouton"
+                                        : "demarrage a froid");
 
     rc = tk_hal_esp32_init(&hal, &s_client);
     if (rc != TK_OK) {
@@ -387,11 +650,19 @@ void app_main(void)
         }
     }
 
-    (void)xTaskCreate(button_task, "button", 3072, NULL, 5, NULL);
     (void)xTaskCreate(console_task, "console", 4096, NULL, 4, NULL);
+
+    /* Reveille par un bouton : on cherche le vehicule tout de suite, la
+     * demande sera servie au premier tour de boucle. */
+    if (woke) {
+        tk_hal_esp32_lock();
+        (void)tk_client_start(&s_client);
+        tk_hal_esp32_unlock();
+    }
 
     for (;;) {
         request_t req = s_request;
+        int       want_sleep;
 
         tk_hal_esp32_lock();
         if (req != REQ_NONE) {
@@ -399,7 +670,30 @@ void app_main(void)
             service_request(req);
         }
         tk_client_tick(&s_client);
+
+        /* Un cycle retombe a IDLE avec des actions non emises (vehicule
+         * introuvable, lien perdu) : elles ne doivent pas partir plus
+         * tard par surprise. */
+        if (s_pending > 0 && tk_client_state(&s_client) == TK_STATE_IDLE) {
+            s_pending = 0;
+            s_failed  = 0;
+            tk_client_stop(&s_client);
+            power_led_set(POWER_LED_FAIL);
+        }
+        /* Reveil sans geste abouti : rien a signaler. */
+        if (!s_pairing && app_idle()) {
+            power_led_set(POWER_LED_OFF);
+        }
+
+        want_sleep = !s_stay_awake && app_idle() &&
+                     (s_sleep_now ||
+                      (int32_t)(uptime_ms() - s_awake_until) >= 0);
         tk_hal_esp32_unlock();
+
+        if (want_sleep) {
+            s_sleep_now = 0;
+            go_to_sleep();
+        }
 
         vTaskDelay(pdMS_TO_TICKS(100));
     }

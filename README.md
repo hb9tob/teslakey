@@ -82,7 +82,7 @@ hal/
   esp32/              NimBLE, NVS, esp_timer
   nrf/                Bluetooth Zephyr, settings, k_uptime
 
-apps/esp32/           application ESP-IDF (bouton + console série)
+apps/esp32/           application ESP-IDF (boutons, veille, console série)
 apps/nrf52840/        application Zephyr (bouton seul)
 tests/                HAL hôte sur OpenSSL + suite de tests
 docs/PROTOCOL.md      la spécification, vérifiée ligne à ligne
@@ -139,7 +139,7 @@ directement :
 ```sh
 cd apps/esp32
 idf.py set-target esp32          # ou esp32c3, esp32s3
-idf.py menuconfig                # teslakey → VIN, GPIO du bouton
+idf.py menuconfig                # teslakey → VIN, boutons, LED, veille
 idf.py build flash monitor
 ```
 
@@ -191,23 +191,66 @@ Le VIN ne se versionne pas. Copiez `secrets/tk_secrets.example.h` en
 compilé dans le firmware. Sans ce fichier, la compilation utilise un VIN
 fictif, à remplacer par la commande `vin` de la console.
 
-Il ne reste alors qu'une commande à taper dans le moniteur série :
-
-```
-pair
-```
+Il ne reste alors qu'à demander l'appairage : **triple appui** sur le
+bouton (ou `pair` dans le moniteur série). La LED clignote lentement.
 
 Puis **posez votre carte NFC Tesla sur la console centrale** et confirmez à
-l'écran. Le véhicule doit être réveillé et vous à l'intérieur.
+l'écran. Le véhicule doit être réveillé et vous à l'intérieur. La LED reste
+allumée 1,5 s quand la clé est acceptée.
 
 Au démarrage, le firmware affiche le nom BLE qu'il recherche, dérivé du
 VIN. Si le véhicule n'est jamais trouvé alors qu'une ligne `autre Tesla en
 vue : S…C` apparaît, le VIN saisi est faux. La commande `vin <17
 caractères>` change de véhicule et rend le choix persistant en mémoire.
 
-Ensuite le bouton suffit : appui court pour ouvrir, appui long pour ouvrir
-et autoriser la conduite. Autres commandes : `unlock`, `lock`, `drive`,
-`trunk`, `frunk`, `chargeport`, `status`, `help`.
+Commandes de la console : `unlock`, `lock`, `drive`, `trunk`, `frunk`,
+`chargeport`, `status`, `sleep`, `awake`, `help`.
+
+### Boutons, LED et veille
+
+La carte dort en sommeil profond et ne se réveille que sur un appui. Elle
+fait alors un cycle scan → connexion → commande, signale le résultat et se
+rendort.
+
+| Geste | Action |
+|---|---|
+| Appui court | ouvrir et autoriser la conduite |
+| Double appui | verrouiller |
+| Triple appui | demander l'appairage (carte NFC) |
+| Appui long (≥ 0,8 s) | coffre |
+
+Deux boutons portent ces gestes : le bouton BOOT/PRG de la carte (GPIO 0)
+et un **bouton externe** optionnel, à câbler entre sa broche et GND sans
+résistance (tirage interne). Sa broche vaut GPIO 6 par défaut sur
+ESP32-S3 ; elle se règle dans `menuconfig`, `-1` pour s'en passer. Sur
+ESP32 classique, seul le bouton principal réveille la carte.
+
+Le geste est lu par un *wake stub* : un petit code en mémoire RTC, exécuté
+quelques millisecondes après le réveil, avant le redémarrage du firmware.
+Sans lui, le second appui d'un double appui rapide tomberait pendant le
+démarrage et passerait inaperçu. Il existe sur ESP32 et ESP32-S3 ; sur les
+autres cibles, l'application lit le geste une fois démarrée.
+
+| LED | Signification |
+|---|---|
+| Scintillement rapide | cycle en cours |
+| Fixe 1,5 s | accepté |
+| Trois éclats | échec : véhicule introuvable, refus, clé non appairée |
+| Clignotement lent | appairage, carte NFC attendue |
+
+La carte se rendort 5 s après la dernière action ; le lien reste établi
+pendant ce temps, un second geste part donc sans refaire le scan. Après une
+mise sous tension ou un reset, elle reste éveillée 60 s pour la console,
+délai relancé à chaque ligne tapée. `awake` la garde éveillée, `sleep`
+l'endort tout de suite, et `sleep 3` la réveille seule au bout de 3 s, sans
+geste : c'est l'outil de banc pour vérifier le chemin de réveil.
+
+Sur le Heltec WiFi LoRa 32 V3, `sdkconfig.defaults.heltec_v3` active la LED
+(GPIO 35) et, avant le sommeil, coupe Vext et endort la radio LoRa.
+PlatformIO l'applique tout seul ; avec `idf.py`, ajoutez
+`-D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.heltec_v3"`.
+Après un changement de ces défauts, supprimez le `sdkconfig.<carte>` généré
+pour qu'ils soient repris.
 
 ---
 
