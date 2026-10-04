@@ -306,6 +306,18 @@ Une commande capturée en l'air ne peut pas être rejouée.
 
 ## Licence et responsabilité
 
+teslakey est un logiciel libre sous **GNU GPL version 3 ou ultérieure**
+(`LICENSE`). Vous pouvez l'utiliser, le modifier et le redistribuer, à
+condition que toute version redistribuée, modifiée ou non, reste sous la
+même licence et que son code source soit fourni. Il est distribué sans
+aucune garantie.
+
+Les fichiers `docs/*.proto` sont des copies non modifiées de
+[`teslamotors/vehicle-command`](https://github.com/teslamotors/vehicle-command),
+publié par Tesla sous licence Apache 2.0 (`docs/LICENSE-Apache-2.0.txt`) ;
+ils restent sous cette licence. Le détail est dans `NOTICE`. Ce projet
+n'est ni affilié à Tesla, ni approuvé par elle.
+
 Ce code pilote un véhicule. Il n'a été essayé que sur une seule voiture.
 Faites vos premiers essais à l'arrêt, dans un endroit sûr, et ne comptez pas
 dessus comme unique moyen d'accès avant de l'avoir éprouvé : gardez votre

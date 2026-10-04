@@ -1,0 +1,36 @@
+teslakey
+Copyright (C) 2026 hb9tob
+
+Ce programme est un logiciel libre : vous pouvez le redistribuer et le
+modifier selon les termes de la GNU General Public License, version 3 ou
+(a votre choix) toute version ulterieure, telle que publiee par la Free
+Software Foundation. Il est distribue SANS AUCUNE GARANTIE. Le texte
+complet de la licence est dans le fichier LICENSE.
+
+SPDX-License-Identifier: GPL-3.0-or-later
+
+
+Composants tiers
+----------------
+
+Ce depot contient des elements issus de teslamotors/vehicle-command
+(https://github.com/teslamotors/vehicle-command), publie par Tesla, Inc.
+sous licence Apache, version 2.0. Le texte de cette licence est dans
+docs/LICENSE-Apache-2.0.txt. Ces elements restent sous licence Apache 2.0 :
+
+  - docs/errors.proto
+  - docs/keys.proto
+  - docs/signatures.proto
+  - docs/universal_message.proto
+  - docs/vcsec.proto
+
+    Copies non modifiees des fichiers de pkg/protocol/protobuf/ du depot
+    d'origine. Ils servent de reference documentaire : le firmware n'en
+    genere aucun code.
+
+  - Les vecteurs de test marques [TESLA] dans tests/test_main.c
+    reprennent des valeurs des tests unitaires du meme depot.
+
+teslakey n'est ni affilie a Tesla, Inc., ni approuve par elle. « Tesla »
+est une marque de Tesla, Inc., citee ici a seule fin de decrire la
+compatibilite du logiciel.
