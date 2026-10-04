@@ -2,7 +2,8 @@
  * teslakey — application nRF52840 (Zephyr / nRF Connect SDK)
  *
  * Variante porte-cles : un bouton, pas de console indispensable.
- * Le VIN est fourni a la compilation par CONFIG_TESLAKEY_VIN, ce qui
+ * Le VIN est fourni a la compilation (secrets/tk_secrets.h, a defaut
+ * CONFIG_TESLAKEY_VIN), ce qui
  * evite d'avoir a le saisir sur une carte sans console.
  *
  * Bouton (button0 de l'arbre materiel) :
@@ -20,6 +21,17 @@
 #include "teslakey/tk_err.h"
 
 #include "tk_hal_nrf.h"
+
+/* Le vrai VIN vit dans secrets/tk_secrets.h, hors du depot. A defaut on
+ * prend le VIN d'exemple de Kconfig. */
+#if defined(__has_include)
+#if __has_include("tk_secrets.h")
+#include "tk_secrets.h"
+#endif
+#endif
+#ifndef TK_SECRET_VIN
+#define TK_SECRET_VIN CONFIG_TESLAKEY_VIN
+#endif
 
 LOG_MODULE_REGISTER(app, CONFIG_TESLAKEY_LOG_LEVEL);
 
@@ -197,9 +209,9 @@ int main(void)
         return 0;
     }
 
-    rc = tk_client_set_vin(&s_client, CONFIG_TESLAKEY_VIN);
+    rc = tk_client_set_vin(&s_client, TK_SECRET_VIN);
     if (rc != TK_OK) {
-        LOG_ERR("CONFIG_TESLAKEY_VIN invalide : il doit faire exactement "
+        LOG_ERR("VIN de compilation invalide : il doit faire exactement "
                 "17 caracteres");
         return 0;
     }

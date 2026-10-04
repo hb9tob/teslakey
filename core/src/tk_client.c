@@ -54,8 +54,9 @@ static void set_state(tk_client *c, tk_state st)
 
 static void fail(tk_client *c, int err)
 {
-    c->cmd_in_flight = 0;
-    c->has_last_uuid = 0;
+    c->cmd_in_flight  = 0;
+    c->has_last_uuid  = 0;
+    c->enroll_pending = 0;
     set_state(c, TK_STATE_IDLE);
     if (c->cb.on_error != NULL) {
         c->cb.on_error(c->user, err);
@@ -154,6 +155,10 @@ static int encode_action(tk_action action, uint8_t *out, size_t cap)
     case TK_ACTION_OPEN_FRUNK:
         return tk_vcsec_encode_closure(out, cap,
                                        TK_CLOSURE_FIELD_FRONT_TRUNK,
+                                       TK_CLOSURE_MOVE);
+    case TK_ACTION_OPEN_CHARGE_PORT:
+        return tk_vcsec_encode_closure(out, cap,
+                                       TK_CLOSURE_FIELD_CHARGE_PORT,
                                        TK_CLOSURE_MOVE);
     default:
         return TK_ERR_INVAL;
@@ -326,6 +331,27 @@ static void handle_command_response(tk_client *c, const tk_msg_rx *rx)
     finish_action(c, rc);
 }
 
+static void not_whitelisted(tk_client *c)
+{
+    /* Pendant l'enrolement c'est la reponse attendue tant que la carte NFC
+     * n'a pas ete presentee : on continue d'interroger. */
+    if (c->state == TK_STATE_ENROLLING) {
+        return;
+    }
+    tk_log(c, TK_LOG_WARN, "cle non appairee");
+    /* Les actions en file ne doivent pas partir par surprise apres un
+     * appairage ulterieur. */
+    c->q_count = 0;
+    c->q_head  = 0;
+    set_state(c, TK_STATE_IDLE);
+    if (c->hal.ble.disconnect != NULL) {
+        (void)c->hal.ble.disconnect(c->hal.ble.ctx);
+    }
+    if (c->cb.on_not_whitelisted != NULL) {
+        c->cb.on_not_whitelisted(c->user);
+    }
+}
+
 static void handle_session_info(tk_client *c, const tk_msg_rx *rx)
 {
     uint64_t t = now_ms(c);
@@ -336,6 +362,17 @@ static void handle_session_info(tk_client *c, const tk_msg_rx *rx)
         return;
     }
     if (!rx->has_info_tag) {
+        tk_session_info info;
+
+        /* Un vehicule qui ne connait pas notre cle n'a aucun secret avec
+         * lequel signer : il annonce KEY_NOT_ON_WHITELIST sans tag. On
+         * n'en tire rien d'autre que l'abandon du cycle. */
+        if (tk_session_info_decode(rx->session_info, rx->session_info_len,
+                                   &info) == TK_OK &&
+            info.status == TK_SESSION_STATUS_KEY_NOT_WHITELISTED) {
+            not_whitelisted(c);
+            return;
+        }
         tk_log(c, TK_LOG_WARN, "session info non authentifiee, ignoree");
         return;
     }
@@ -363,11 +400,7 @@ static void handle_session_info(tk_client *c, const tk_msg_rx *rx)
     }
 
     if (rc == TK_ERR_NOT_WHITELISTED) {
-        tk_log(c, TK_LOG_WARN, "cle non appairee");
-        set_state(c, TK_STATE_IDLE);
-        if (c->cb.on_not_whitelisted != NULL) {
-            c->cb.on_not_whitelisted(c->user);
-        }
+        not_whitelisted(c);
         return;
     }
     if (rc != TK_OK) {
@@ -377,7 +410,7 @@ static void handle_session_info(tk_client *c, const tk_msg_rx *rx)
 
     tk_log(c, TK_LOG_INFO, "session authentifiee");
 
-    if (c->state == TK_STATE_HANDSHAKE) {
+    if (c->state == TK_STATE_HANDSHAKE || c->state == TK_STATE_ENROLLING) {
         set_state(c, TK_STATE_READY);
         if (c->cb.on_ready != NULL) {
             c->cb.on_ready(c->user);
@@ -439,6 +472,29 @@ static void handle_message(void *user, const uint8_t *msg, size_t len)
 
     if (rx.has_gcm_response && rx.payload != NULL && c->cmd_in_flight) {
         handle_command_response(c, &rx);
+        pump_queue(c);
+        return;
+    }
+
+    /* Sans FLAG_ENCRYPT_RESPONSE, VCSEC repond en clair ; la reponse est
+     * rattachee a la commande par son request_uuid, comme le fait le
+     * client officiel. Un payload vide vaut succes. */
+    if (c->cmd_in_flight && challenge_matches(c, &rx)) {
+        tk_vcsec_rx vr;
+
+        memset(&vr, 0, sizeof(vr));
+        if (rx.payload != NULL && rx.payload_len > 0) {
+            rc = tk_vcsec_decode(rx.payload, rx.payload_len, &vr);
+            if (rc == TK_OK) {
+                rc = tk_vcsec_status_to_err(&vr);
+            }
+            if (rc == TK_ERR_BUSY) {
+                tk_log(c, TK_LOG_DEBUG, "vehicule occupe, on attend");
+                return;
+            }
+        }
+        finish_action(c, rc);
+        set_state(c, TK_STATE_READY);
         pump_queue(c);
         return;
     }
@@ -675,17 +731,25 @@ int tk_client_enroll(tk_client *c, uint32_t role)
     /* L'enrolement voyage en clair : il doit pouvoir partir alors que la
      * session n'est pas etablie, puisque la cle n'est pas encore connue
      * du vehicule (§7). Il faut seulement etre connecte. */
-    if (c->state == TK_STATE_IDLE || c->state == TK_STATE_SCANNING ||
-        c->state == TK_STATE_CONNECTING) {
-        return TK_ERR_STATE;
+    c->enroll_role = role;
+    if (c->state == TK_STATE_IDLE) {
+        rc = tk_client_start(c);
+        if (rc != TK_OK) {
+            return rc;
+        }
     }
+    if (c->state == TK_STATE_SCANNING || c->state == TK_STATE_CONNECTING) {
+        /* Partira de tk_client_on_connected(). */
+        c->enroll_pending = 1;
+        return TK_OK;
+    }
+    c->enroll_pending = 0;
 
     len = tk_vcsec_encode_add_key(c->tx, sizeof(c->tx), c->pub,
                                   role, TK_FORM_FACTOR_ANDROID_DEVICE);
     if (len < 0) {
         return len;
     }
-    c->enroll_role = role;
 
     rc = send_framed(c, c->tx, (size_t)len);
     if (rc != TK_OK) {
@@ -694,6 +758,7 @@ int tk_client_enroll(tk_client *c, uint32_t role)
     tk_log(c, TK_LOG_INFO,
            "demande d'enrolement envoyee : poser la carte NFC sur la console");
     set_state(c, TK_STATE_ENROLLING);
+    c->enroll_poll_ms = now_ms(c);
     return TK_OK;
 }
 
@@ -726,6 +791,19 @@ void tk_client_tick(tk_client *c)
     case TK_STATE_HANDSHAKE:
         if (elapsed > TK_HANDSHAKE_TIMEOUT_MS) {
             fail(c, TK_ERR_TIMEOUT);
+        }
+        break;
+    case TK_STATE_ENROLLING:
+        /* Le vehicule ne confirme pas l'enrolement : on redemande une
+         * session jusqu'a ce que la cle soit acceptee. */
+        if (elapsed > TK_ENROLL_TIMEOUT_MS) {
+            if (c->hal.ble.disconnect != NULL) {
+                (void)c->hal.ble.disconnect(c->hal.ble.ctx);
+            }
+            fail(c, TK_ERR_TIMEOUT);
+        } else if (now_ms(c) - c->enroll_poll_ms > TK_ENROLL_POLL_MS) {
+            c->enroll_poll_ms = now_ms(c);
+            (void)send_session_request(c);
         }
         break;
     case TK_STATE_COMMAND:
@@ -785,6 +863,13 @@ void tk_client_on_connected(tk_client *c)
     tk_session_clear(&c->sess);
 
     set_state(c, TK_STATE_HANDSHAKE);
+    if (c->enroll_pending) {
+        rc = tk_client_enroll(c, c->enroll_role);
+        if (rc != TK_OK) {
+            fail(c, rc);
+        }
+        return;
+    }
     rc = send_session_request(c);
     if (rc != TK_OK) {
         fail(c, rc);

@@ -1,79 +1,54 @@
 # Reste à faire
 
-État au 3 octobre 2026. Le cœur protocolaire est testé et le firmware tourne
-sur un Heltec WiFi LoRa 32 V3 (ESP32-S3), mais **le BLE n'a jamais vu le
-véhicule**. C'est l'objet de la prochaine séance.
+État au 4 octobre 2026. **Le firmware a ouvert et autorisé la conduite d'un
+vrai véhicule** depuis le Heltec WiFi LoRa 32 V3 (ESP32-S3).
 
 ---
 
-## 1. Essai dans la voiture — la prochaine étape
+## 1. Essai dans la voiture — fait le 4 octobre 2026
 
-### À emporter
+Résultat : scan (RSSI −40 dBm dans l'habitacle), connexion, MTU 247,
+découverte GATT, appairage par carte NFC (≈ 6 s entre `pair` et
+l'acceptation), session authentifiée, `unlock` et `drive` acceptés, `lock`
+refusé proprement portière ouverte. Après redémarrage la clé est relue de
+la NVS et reconnue. Un cycle complet scan → commande acceptée prend ≈ 1,8 s.
 
-- la carte Heltec V3 flashée, sur COM9
-- un PC portable avec un câble USB (la console série est le seul moyen de
-  lancer l'appairage aujourd'hui)
-- **la carte-clé NFC Tesla** : sans elle, aucun appairage n'est possible
-- de quoi couper le Bluetooth des téléphones présents (voir pièges)
+Ce que l'essai a révélé et corrigé :
 
-### Procédure
-
-1. Réveiller le véhicule (ouvrir une portière suffit) et s'installer
-   dedans. L'appairage exige d'être à l'intérieur.
-2. Ouvrir la console série :
-   `pio device monitor -p COM9 -b 115200` depuis `apps/esp32/`
-3. Vérifier au démarrage la ligne
-   `nom BLE recherche : S57bfc47617573c4eC`.
-   C'est la valeur attendue pour le VIN `5YJ3E1EA7JF000000`.
-4. Taper `unlock` : cela déclenche scan → connexion → handshake. Attendu à
-   ce stade, puisque la clé n'est pas encore appairée :
-   `cle non appairee` et l'invitation à taper `pair`.
-   C'est **le premier vrai test du BLE** : s'il arrive jusque-là, le scan,
-   la découverte GATT et le transport fonctionnent.
-5. Taper `pair`, puis **poser la carte NFC sur la console centrale** et
-   confirmer sur l'écran du véhicule. Sans traîner : l'approbation expire.
-6. Taper `unlock` à nouveau. Les portières doivent se déverrouiller.
-7. `drive` : déverrouille puis autorise la conduite. **À l'arrêt, dans un
-   endroit sûr.** Vérifier qu'on peut enclencher une position sans la carte
-   NFC sur le lecteur.
-8. Couper l'alimentation, rebrancher : la clé doit être relue depuis la NVS
-   (`cle existante rechargee`) et `unlock` doit marcher sans réappairer.
-
-### Ce qu'il faut noter pendant l'essai
-
-Le journal est la seule trace : **copier tout le log de la console**, même
-en cas de succès. En particulier :
-
-- le RSSI et le temps mis pour trouver le véhicule
-- le MTU négocié (`MTU negocie : N`) — s'il reste à 23, c'est normal
-- tout message `decouverte GATT : ...` : c'est là que le HAL NimBLE est le
-  plus susceptible de se tromper (handles, CCCD)
-- le délai entre `pair` et l'acceptation
-
-### Pièges connus
-
-| Symptôme | Cause probable |
+| Constat sur véhicule | Correction |
 |---|---|
-| Le véhicule n'est jamais trouvé | Véhicule endormi, ou VIN erroné. Vérifier le nom BLE annoncé au démarrage avec un scanner BLE sur téléphone (nRF Connect). |
-| `vehicule non connectable (trop de liens)` | La Tesla limite le nombre de connexions BLE. Couper le Bluetooth des téléphones appairés. |
-| `delai depasse en attendant la carte NFC` | L'approbation a expiré. Relancer `pair` et poser la carte immédiatement. |
-| `decouverte GATT : CCCD de RX introuvable` | Bug dans `tk_ble_nimble.c` : la plage de recherche du descripteur. |
-| `commande expiree` à répétition | Horloge : vérifier `clock_offset_s` et la resynchronisation. |
-| `trousseau du vehicule plein` | Supprimer une clé depuis l'écran du véhicule (limite ~19). |
+| Le nom BLE est dans la **réponse de scan**, pas dans l'advertisement | Scan actif ; la connectabilité est mémorisée depuis l'advertisement (`tk_ble_nimble.c`) |
+| Le VIN configuré avait une faute de frappe | VIN corrigé ; le HAL signale désormais toute autre Tesla en vue |
+| `ble_gattc_disc_svc_by_uuid` ne trouve pas le service `0211` | Énumération de tous les services |
+| Clé inconnue : session info `KEY_NOT_ON_WHITELIST` **sans tag** | Le cœur la reconnaît au lieu de l'ignorer |
+| L'enrôlement n'est pas acquitté par le véhicule | `pair` enchaîne connexion → demande, puis redemande une session toutes les 2 s (60 s max) |
+| Débordement de pile de la tâche hôte NimBLE (4 Ko) pendant l'ECDH | `CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192` |
+| VCSEC répond **en clair**, rattaché par `request_uuid` ; payload vide = succès | Nouveau chemin de réception, `TK_ERR_CLOSURES_OPEN` |
+
+Le journal brut de la séance est dans `essai-vehicule.log` (non versionné).
+
+Pour revoir les trames : passer le niveau de log à `DEBUG`, le HAL dumpe
+alors chaque bloc TX/RX en hexadécimal.
 
 ---
 
-## 2. À faire avant l'essai (recommandé)
+## 2. Suites directes de l'essai
 
-- [ ] **Ajouter une commande `scan` à la console.** Aujourd'hui, pour tester
-      le BLE il faut taper `unlock`, qui met une action en file. Sans risque
-      tant que la clé n'est pas appairée, mais il manque une commande qui
-      s'arrête après le handshake sans rien envoyer au véhicule. Utile pour
-      diagnostiquer sans agir sur la voiture.
-- [ ] Augmenter le niveau de log à `DEBUG` pour l'essai
-      (`CONFIG_LOG_DEFAULT_LEVEL_DEBUG=y` dans `sdkconfig.defaults`) :
-      les traces de réassemblage et d'aiguillage des messages seront
-      précieuses en cas d'échec.
+- [ ] **Sortir la crypto de la tâche hôte NimBLE.** Agrandir la pile règle
+      le plantage, mais le cœur tourne toujours dans le rappel GAP. Mieux :
+      poster les blocs reçus dans une file et les traiter dans la tâche
+      principale.
+- [ ] Les réponses VCSEC en clair ne sont pas authentifiées (comme dans le
+      client officiel). Envisager `FLAG_ENCRYPT_RESPONSE` pour que
+      « accepté » soit une affirmation signée du véhicule.
+- [ ] `trunk` (ouvre puis referme), `frunk` et `chargeport` essayés avec
+      succès. Le port de charge ne libère le câble qu'avec le type MOVE :
+      OPEN est accepté mais ne déverrouille pas le loquet. Reste : le
+      bouton (appui court / long) et `lock` portes fermées.
+- [ ] Reporter sur le HAL nRF la mémorisation de connectabilité et vérifier
+      la découverte de service (le scan actif y est déjà reporté, non
+      compilé).
+- [ ] Commande `scan` de diagnostic, qui s'arrête après le handshake.
 
 ---
 
@@ -120,18 +95,18 @@ en cas de succès. En particulier :
       l'extraire et démarrer la voiture.
 - [ ] Garder `TK_ROLE_DRIVER` (c'est le défaut) et non `ROLE_OWNER` : la
       clé peut ouvrir et conduire, mais pas gérer les autres clés.
-- [ ] Savoir révoquer : la clé se supprime depuis l'écran du véhicule.
-      À tester une fois, pour ne pas le découvrir en urgence.
-- [ ] **Le VIN est en clair** dans `apps/esp32/main/Kconfig.projbuild`,
-      `apps/nrf52840/Kconfig` et `tests/test_main.c`. Nécessaire au
-      fonctionnement, mais à remplacer par un VIN d'exemple si ce dépôt
-      devient public.
+- [x] Savoir révoquer : clé supprimée depuis l'écran le 4 octobre 2026, la
+      voiture répond alors « clé non appairée » ; réappairage réussi dans
+      la foulée.
+- [x] Le VIN n'est plus dans le dépôt : il vit dans `secrets/tk_secrets.h`
+      (ignoré par git), seul `tk_secrets.example.h` est versionné. Les
+      Kconfig et les tests n'utilisent que des VIN fictifs.
 
 ---
 
 ## 6. Ce qui est acquis
 
-- Cœur protocolaire : 798 vérifications, 0 échec, dont les **vecteurs de
+- Cœur protocolaire : 844 vérifications, 0 échec, dont les **vecteurs de
   test officiels de Tesla** (ECDH P-256, dérivation de clé publique,
   somme de contrôle des métadonnées) et les vecteurs HMAC de la RFC 4231.
 - Compile sans aucun avertissement avec `-Wall -Wextra -Wpedantic
@@ -141,6 +116,8 @@ en cas de succès. En particulier :
   vecteurs et en interopérabilité bit à bit avec OpenSSL.
 - ESP32 et ESP32-S3 : compilation et lien sans avertissement, symboles
   vérifiés dans l'ELF.
+- Sur véhicule : appairage, session, ouvrir, verrouiller, autoriser la
+  conduite (voir section 1).
 - Sur matériel : démarrage, console, génération de la clé P-256 par la
   puce, persistance NVS dans les deux sens, et nom BLE calculé par le
   firmware identique à la référence OpenSSL.

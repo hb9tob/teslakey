@@ -241,14 +241,17 @@ static void veh_send_session_info(vehicle_t *v,
     /* session_info = 15 */
     (void)tk_pb_bytes(&e, TK_F_SESSION_INFO, info, (size_t)info_len);
 
-    /* signature_data = 13 { session_info_tag = 6 { tag = 1 } } */
-    m = tk_pb_sub_begin(&e, TK_F_SIGNATURE_DATA);
-    {
-        size_t m2 = tk_pb_sub_begin(&e, 6);
-        (void)tk_pb_bytes(&e, 1, tag, sizeof(tag));
-        (void)tk_pb_sub_end(&e, m2);
+    /* signature_data = 13 { session_info_tag = 6 { tag = 1 } }
+     * Comme le vrai vehicule, pas de tag pour une cle inconnue. */
+    if (status != TK_SESSION_STATUS_KEY_NOT_WHITELISTED) {
+        m = tk_pb_sub_begin(&e, TK_F_SIGNATURE_DATA);
+        {
+            size_t m2 = tk_pb_sub_begin(&e, 6);
+            (void)tk_pb_bytes(&e, 1, tag, sizeof(tag));
+            (void)tk_pb_sub_end(&e, m2);
+        }
+        (void)tk_pb_sub_end(&e, m);
     }
-    (void)tk_pb_sub_end(&e, m);
 
     if (fault != 0) {
         /* signedMessageStatus = 12 { operation_status = 1, fault = 2 } */
@@ -943,14 +946,24 @@ static void test_not_whitelisted_then_enroll(tk_crypto_if *cr)
     LB_CHECK(g_not_whitelisted == 1);
     LB_CHECK(g_ready == 0);
 
-    /* L'application demande l'enrolement. L'etat est IDLE apres le refus,
-     * donc l'enrolement doit etre refuse : il exige d'etre connecte. */
-    LB_CHECK(tk_client_enroll(&g_cli, TK_ROLE_DRIVER) == TK_ERR_STATE);
+    LB_CHECK(tk_client_state(&g_cli) == TK_STATE_IDLE);
 
-    /* En pratique on reste connecte : on refait un handshake, puis on
-     * enrole. Ici on simule directement l'etat connecte. */
-    tk_client_on_connected(&g_cli);
+    /* L'application demande l'enrolement depuis IDLE : le client relance
+     * un cycle et emet la demande des que le lien est etabli. */
     LB_CHECK(tk_client_enroll(&g_cli, TK_ROLE_DRIVER) == TK_OK);
+    LB_CHECK(tk_client_state(&g_cli) == TK_STATE_SCANNING);
+    LB_CHECK(g_veh.enroll_requested == 0);
+    {
+        tk_ble_peer peer;
+        char        name[TK_LOCAL_NAME_LEN + 1];
+
+        memset(&peer, 0, sizeof(peer));
+        peer.connectable = 1;
+        LB_CHECK(tk_client_local_name(&g_cli, name, sizeof(name)) == TK_OK);
+        tk_client_on_scan_result(&g_cli, &peer, name, TK_LOCAL_NAME_LEN);
+    }
+    tk_client_on_connected(&g_cli);
+    LB_CHECK(tk_client_state(&g_cli) == TK_STATE_ENROLLING);
     LB_CHECK(g_veh.enroll_requested == 1);
     LB_CHECK(g_veh.whitelisted == 1);
 
@@ -960,6 +973,62 @@ static void test_not_whitelisted_then_enroll(tk_crypto_if *cr)
     veh_pump(&g_veh);
     LB_CHECK(g_ready == 1);
     LB_CHECK(tk_client_state(&g_cli) == TK_STATE_READY);
+}
+
+/* Reponse VCSEC en clair, rattachee par request_uuid : c'est ce que renvoie
+ * un vrai vehicule quand FLAG_ENCRYPT_RESPONSE n'est pas demande. */
+static void veh_send_plain_response(vehicle_t *v,
+                                    const uint8_t *payload, size_t len)
+{
+    uint8_t   msg[128];
+    tk_pb_enc e;
+    size_t    m;
+    int       n;
+
+    tk_pb_enc_init(&e, msg, sizeof(msg));
+    m = tk_pb_sub_begin(&e, TK_F_FROM_DESTINATION);
+    (void)tk_pb_varint(&e, 1, TK_DOMAIN_VEHICLE_SECURITY);
+    (void)tk_pb_sub_end(&e, m);
+    if (len > 0) {
+        (void)tk_pb_bytes(&e, TK_F_PROTOBUF_BYTES, payload, len);
+    }
+    (void)tk_pb_bytes(&e, TK_F_REQUEST_UUID, g_cli.last_uuid, TK_UUID_LEN);
+    n = tk_pb_enc_finish(&e);
+    if (n > 0) {
+        veh_queue(v, msg, (size_t)n);
+    }
+}
+
+static void test_plain_response(tk_crypto_if *cr)
+{
+    /* Octets releves sur vehicule : nominalError { CLOSURES_OPEN }. */
+    static const uint8_t closures_open[] = { 0xf2, 0x02, 0x02, 0x08, 0x02 };
+
+    lb_begin("boucle : reponses VCSEC en clair");
+
+    setup(cr, 1);
+    connect_and_handshake();
+    LB_CHECK(g_ready == 1);
+
+    LB_CHECK(tk_client_queue(&g_cli, TK_ACTION_LOCK) == TK_OK);
+    g_veh.out_count = 0;    /* on remplace la reponse chiffree du simulateur */
+    veh_send_plain_response(&g_veh, closures_open, sizeof(closures_open));
+    veh_pump(&g_veh);
+    LB_CHECK(g_done_count == 1);
+    if (g_done_count == 1) {
+        LB_CHECK(g_done_err[0] == TK_ERR_CLOSURES_OPEN);
+    }
+    LB_CHECK(tk_client_state(&g_cli) == TK_STATE_READY);
+
+    /* Payload vide : succes. */
+    LB_CHECK(tk_client_queue(&g_cli, TK_ACTION_UNLOCK) == TK_OK);
+    g_veh.out_count = 0;
+    veh_send_plain_response(&g_veh, NULL, 0);
+    veh_pump(&g_veh);
+    LB_CHECK(g_done_count == 2);
+    if (g_done_count == 2) {
+        LB_CHECK(g_done_err[1] == TK_OK);
+    }
 }
 
 static void test_resync(tk_crypto_if *cr)
@@ -1127,6 +1196,7 @@ int tk_run_loopback_tests(tk_crypto_if *cr, int *checks, int *fails)
     test_unlock_and_drive(cr);
     test_corrupt_session_tag(cr);
     test_not_whitelisted_then_enroll(cr);
+    test_plain_response(cr);
     test_resync(cr);
     test_replayed_response(cr);
     test_disconnect_clears_session(cr);

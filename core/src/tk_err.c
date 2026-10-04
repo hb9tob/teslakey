@@ -24,6 +24,7 @@ const char *tk_strerror(int err)
     case TK_ERR_STALE_SESSION:    return "session info recue trop tard";
     case TK_ERR_NO_SESSION:       return "aucune session etablie";
     case TK_ERR_VEHICLE_FAULT:    return "commande refusee par le vehicule";
+    case TK_ERR_CLOSURES_OPEN:    return "une portiere ou un coffre est ouvert";
     case TK_ERR_NOT_WHITELISTED:  return "cle non appairee";
     case TK_ERR_NEEDS_RESYNC:     return "resynchronisation necessaire";
     case TK_ERR_BUSY:             return "vehicule occupe";

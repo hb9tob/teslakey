@@ -34,6 +34,7 @@ typedef enum {
     TK_ERR_NOT_WHITELISTED  = -41,  /* notre cle n'est pas appairee           */
     TK_ERR_NEEDS_RESYNC     = -42,  /* refaire le handshake puis reessayer    */
     TK_ERR_BUSY             = -43,  /* reessayer plus tard                    */
+    TK_ERR_CLOSURES_OPEN    = -44,  /* un ouvrant empeche le verrouillage     */
 } tk_err_t;
 
 /* Libelle court et stable d'un code d'erreur. Jamais NULL. */

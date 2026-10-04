@@ -27,4 +27,6 @@ target_include_directories(app PRIVATE
     ${TK_ROOT}/core/src
     ${TK_ROOT}/hal/common
     ${TK_ROOT}/hal/nrf
+    # secrets/tk_secrets.h (non versionne) fournit le VIN s'il existe.
+    ${TK_ROOT}/secrets
 )

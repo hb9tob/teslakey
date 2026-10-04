@@ -4,6 +4,10 @@ config TESLAKEY_VIN
     string "VIN du vehicule (17 caracteres)"
     default "5YJ3E1EA7JF000000"
     help
+      Valeur par defaut fictive : le vrai VIN se met dans
+      secrets/tk_secrets.h (ignore par git), qui prend le pas sur cette
+      option.
+
       Le VIN sert a deux choses : deriver le nom BLE recherche
       (SHA1 du VIN) et personnaliser les signatures. Il doit faire
       exactement 17 caracteres.

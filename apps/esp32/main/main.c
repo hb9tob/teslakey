@@ -28,6 +28,17 @@
 
 #include "tk_hal_esp32.h"
 
+/* Le vrai VIN vit dans secrets/tk_secrets.h, hors du depot. A defaut on
+ * prend le VIN d'exemple de Kconfig. */
+#if defined(__has_include)
+#if __has_include("tk_secrets.h")
+#include "tk_secrets.h"
+#endif
+#endif
+#ifndef TK_SECRET_VIN
+#define TK_SECRET_VIN CONFIG_TESLAKEY_VIN
+#endif
+
 static const char *TAG = "app";
 
 /* Bouton. GPIO 0 est le bouton BOOT sur la majorite des cartes ESP32
@@ -47,6 +58,8 @@ typedef enum {
     REQ_LOCK,
     REQ_PAIR,
     REQ_TRUNK,
+    REQ_FRUNK,
+    REQ_CHARGE_PORT,
 } request_t;
 
 static volatile request_t s_request;
@@ -85,9 +98,9 @@ static void on_action_done(void *user, tk_action action, int err)
 {
     static const char *names[] = {
         "ouvrir", "verrouiller", "autoriser la conduite",
-        "reveiller", "coffre", "coffre avant"
+        "reveiller", "coffre", "coffre avant", "port de charge"
     };
-    const char *name = (action <= TK_ACTION_OPEN_FRUNK)
+    const char *name = (action <= TK_ACTION_OPEN_CHARGE_PORT)
                            ? names[action] : "?";
 
     (void)user;
@@ -168,7 +181,9 @@ static void print_help(void)
            "  unlock               ouvre\n"
            "  lock                 verrouille\n"
            "  drive                ouvre puis autorise la conduite\n"
-           "  trunk                ouvre le coffre\n"
+           "  trunk                ouvre ou referme le coffre\n"
+           "  frunk                ouvre le coffre avant\n"
+           "  chargeport           ouvre le port de charge\n"
            "  status               affiche l'etat courant\n"
            "  help                 cette aide\n\n");
 }
@@ -201,6 +216,10 @@ static void handle_line(char *line)
         s_request = REQ_UNLOCK_AND_DRIVE;
     } else if (strcmp(line, "trunk") == 0) {
         s_request = REQ_TRUNK;
+    } else if (strcmp(line, "frunk") == 0) {
+        s_request = REQ_FRUNK;
+    } else if (strcmp(line, "chargeport") == 0) {
+        s_request = REQ_CHARGE_PORT;
     } else if (strcmp(line, "status") == 0) {
         tk_hal_esp32_lock();
         printf("etat : %s\n", state_name(tk_client_state(&s_client)));
@@ -251,22 +270,17 @@ static void service_request(request_t req)
     tk_state st = tk_client_state(&s_client);
 
     switch (req) {
-    case REQ_PAIR:
-        if (st == TK_STATE_READY || st == TK_STATE_HANDSHAKE ||
-            st == TK_STATE_COMMAND) {
-            int rc = tk_client_enroll(&s_client, TK_ROLE_DRIVER);
-            if (rc == TK_OK) {
-                printf("Demande envoyee. Posez votre carte NFC Tesla sur "
-                       "la console centrale, puis confirmez a l'ecran.\n");
-            } else {
-                printf("appairage impossible : %s\n", tk_strerror(rc));
-            }
+    case REQ_PAIR: {
+        int rc = tk_client_enroll(&s_client, TK_ROLE_DRIVER);
+
+        if (rc == TK_OK) {
+            printf("Appairage lance. Des l'etat 'appairage', posez votre "
+                   "carte NFC Tesla sur la console centrale.\n");
         } else {
-            printf("il faut d'abord etre connecte au vehicule ; "
-                   "lancement d'un cycle...\n");
-            (void)tk_client_start(&s_client);
+            printf("appairage impossible : %s\n", tk_strerror(rc));
         }
         return;
+    }
 
     case REQ_UNLOCK:
         (void)tk_client_queue(&s_client, TK_ACTION_UNLOCK);
@@ -279,6 +293,12 @@ static void service_request(request_t req)
         break;
     case REQ_TRUNK:
         (void)tk_client_queue(&s_client, TK_ACTION_OPEN_TRUNK);
+        break;
+    case REQ_FRUNK:
+        (void)tk_client_queue(&s_client, TK_ACTION_OPEN_FRUNK);
+        break;
+    case REQ_CHARGE_PORT:
+        (void)tk_client_queue(&s_client, TK_ACTION_OPEN_CHARGE_PORT);
         break;
     default:
         return;
@@ -351,11 +371,11 @@ void app_main(void)
                 ESP_LOGI(TAG, "VIN relu depuis la memoire");
             }
         } else {
-            rc = tk_client_set_vin(&s_client, CONFIG_TESLAKEY_VIN);
+            rc = tk_client_set_vin(&s_client, TK_SECRET_VIN);
             if (rc == TK_OK) {
                 ESP_LOGI(TAG, "VIN pris dans la configuration");
             } else {
-                ESP_LOGW(TAG, "CONFIG_TESLAKEY_VIN invalide : tapez "
+                ESP_LOGW(TAG, "VIN de compilation invalide : tapez "
                               "'vin <17 caracteres>' dans la console");
             }
         }

@@ -53,6 +53,8 @@ struct tk_client {
     uint8_t     has_peer;
 
     uint32_t enroll_role;
+    uint8_t  enroll_pending;     /* enrolement a emettre des la connexion */
+    uint64_t enroll_poll_ms;     /* derniere interrogation de la whitelist */
 
     uint8_t tx[TK_TX_BUF_LEN];
 };

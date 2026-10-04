@@ -17,6 +17,11 @@ config TESLAKEY_VIN
       memoire non volatile. La commande 'vin' de la console le remplace
       et le rend persistant.
 
+      La valeur par defaut est fictive. Pour ne pas versionner le vrai
+      VIN, le mettre dans secrets/tk_secrets.h (copie de
+      tk_secrets.example.h, ignoree par git) : il prend alors le pas sur
+      cette option.
+
       Le VIN sert a deux choses : deriver le nom BLE recherche
       (SHA1 du VIN) et personnaliser les signatures des commandes.
 

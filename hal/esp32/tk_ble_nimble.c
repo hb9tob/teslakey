@@ -48,6 +48,8 @@ static const ble_uuid128_t rx_uuid = BLE_UUID128_INIT(
 /* Etat                                                                */
 /* ------------------------------------------------------------------ */
 
+#define CONNECTABLE_CACHE 16
+
 typedef struct {
     tk_client *client;
 
@@ -68,7 +70,12 @@ typedef struct {
 
     /* Nom local recherche, copie car le coeur peut le reutiliser. */
     char     target_name[TK_LOCAL_NAME_LEN + 1];
+    char     other_name[TK_LOCAL_NAME_LEN + 1];   /* derniere autre Tesla vue */
     uint8_t  scanning;
+
+    /* Adresses vues en advertisement connectable pendant le scan. */
+    ble_addr_t connectable[CONNECTABLE_CACHE];
+    uint8_t    connectable_next;
 
     SemaphoreHandle_t lock;
     SemaphoreHandle_t sync_sem;
@@ -223,12 +230,20 @@ static int svc_disc_cb(uint16_t conn_handle,
     (void)arg;
 
     if (error->status == 0 && service != NULL) {
-        g_ble.svc_start = service->start_handle;
-        g_ble.svc_end   = service->end_handle;
+        char str[BLE_UUID_STR_LEN];
+
+        ESP_LOGI(TAG, "service %s [%u..%u]",
+                 ble_uuid_to_str(&service->uuid.u, str),
+                 service->start_handle, service->end_handle);
+        if (ble_uuid_cmp(&service->uuid.u, &svc_uuid.u) == 0) {
+            g_ble.svc_start = service->start_handle;
+            g_ble.svc_end   = service->end_handle;
+        }
         return 0;
     }
 
     if (error->status != BLE_HS_EDONE && error->status != 0) {
+        ESP_LOGW(TAG, "recherche du service : status=%d", error->status);
         discovery_failed("recherche du service");
         return 0;
     }
@@ -253,8 +268,9 @@ static void start_service_discovery(void)
     g_ble.rx_cccd_handle = INVALID_HANDLE;
     g_ble.subscribed     = 0;
 
-    if (ble_gattc_disc_svc_by_uuid(g_ble.conn_handle, &svc_uuid.u,
-                                   svc_disc_cb, NULL) != 0) {
+    /* Enumeration complete plutot que recherche par UUID : le vehicule
+     * ne repond pas a cette derniere, et la liste sert au diagnostic. */
+    if (ble_gattc_disc_all_svcs(g_ble.conn_handle, svc_disc_cb, NULL) != 0) {
         discovery_failed("lancement de la recherche de service");
     }
 }
@@ -302,6 +318,18 @@ static int adv_name(const struct ble_gap_disc_desc *desc,
     return 0;
 }
 
+static int connectable_seen(const ble_addr_t *addr)
+{
+    size_t i;
+
+    for (i = 0; i < CONNECTABLE_CACHE; i++) {
+        if (ble_addr_cmp(&g_ble.connectable[i], addr) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int gap_event_cb(struct ble_gap_event *event, void *arg)
 {
     (void)arg;
@@ -313,8 +341,42 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         size_t      name_len = 0;
         tk_ble_peer peer;
 
+        uint8_t     evt = event->disc.event_type;
+        int         connectable;
+
+        /* Le nom arrive dans la reponse de scan, qui ne dit pas si
+         * l'emetteur est connectable : on le retient a l'advertisement. */
+        if (evt == BLE_HCI_ADV_RPT_EVTYPE_ADV_IND ||
+            evt == BLE_HCI_ADV_RPT_EVTYPE_DIR_IND) {
+            connectable = 1;
+            if (!connectable_seen(&event->disc.addr)) {
+                g_ble.connectable[g_ble.connectable_next] = event->disc.addr;
+                g_ble.connectable_next = (uint8_t)
+                    ((g_ble.connectable_next + 1) % CONNECTABLE_CACHE);
+            }
+        } else if (evt == BLE_HCI_ADV_RPT_EVTYPE_SCAN_RSP) {
+            connectable = connectable_seen(&event->disc.addr);
+        } else {
+            connectable = 0;
+        }
+
         if (adv_name(&event->disc, name, sizeof(name), &name_len) != 0) {
             return 0;
+        }
+        /* Les Tesla s'annoncent toutes en "S<16 hexa>C" : en journaliser
+         * une qui n'est pas la notre signale un VIN errone. */
+        if (name_len == TK_LOCAL_NAME_LEN && name[0] == 'S') {
+            if (memcmp(name, g_ble.target_name, TK_LOCAL_NAME_LEN) == 0) {
+                ESP_LOGI(TAG, "vehicule trouve (rssi %d, %s)",
+                         event->disc.rssi,
+                         connectable ? "connectable" : "non connectable");
+            } else if (memcmp(name, g_ble.other_name, TK_LOCAL_NAME_LEN)
+                       != 0) {
+                /* Une fois par nom, pour ne pas noyer la console. */
+                memcpy(g_ble.other_name, name, TK_LOCAL_NAME_LEN);
+                ESP_LOGW(TAG, "autre Tesla en vue : %s (rssi %d) - "
+                              "VIN errone ?", name, event->disc.rssi);
+            }
         }
         memset(&peer, 0, sizeof(peer));
         memcpy(peer.addr, event->disc.addr.val, 6);
@@ -322,10 +384,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         peer.rssi      = (int8_t)event->disc.rssi;
         /* Un vehicule sature de connexions n'est plus connectable : le
          * coeur sait l'interpreter. */
-        peer.connectable =
-            (event->disc.event_type == BLE_HCI_ADV_RPT_EVTYPE_ADV_IND ||
-             event->disc.event_type == BLE_HCI_ADV_RPT_EVTYPE_DIR_IND)
-            ? 1 : 0;
+        peer.connectable = (uint8_t)connectable;
 
         tk_hal_esp32_lock();
         tk_client_on_scan_result(g_ble.client, &peer, name, name_len);
@@ -391,6 +450,8 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         if (ble_hs_mbuf_to_flat(event->notify_rx.om, buf, len, &len) != 0) {
             return 0;
         }
+        ESP_LOGD(TAG, "RX %u octets", len);
+        ESP_LOG_BUFFER_HEX_LEVEL(TAG, buf, len, ESP_LOG_DEBUG);
         tk_hal_esp32_lock();
         tk_client_on_ble_data(g_ble.client, buf, len);
         tk_hal_esp32_unlock();
@@ -421,9 +482,11 @@ static int ble_scan_start(void *ctx, const char *local_name,
     g_ble.target_name[TK_LOCAL_NAME_LEN] = '\0';
 
     memset(&params, 0, sizeof(params));
-    /* Scan passif : le nom local complet est dans l'advertisement du
-     * vehicule, inutile de solliciter une reponse de scan. */
-    params.passive           = 1;
+    /* Scan actif : le vehicule place son nom local dans la reponse de
+     * scan, pas dans l'advertisement. Un scan passif ne le voit jamais. */
+    memset(g_ble.connectable, 0, sizeof(g_ble.connectable));
+    g_ble.connectable_next   = 0;
+    params.passive           = 0;
     params.filter_duplicates = 0;
     params.itvl              = 0;   /* valeurs par defaut de la pile */
     params.window            = 0;
@@ -489,6 +552,8 @@ static int ble_write(void *ctx, const uint8_t *data, size_t len)
     if (!g_ble.connected || g_ble.tx_val_handle == INVALID_HANDLE) {
         return TK_ERR_STATE;
     }
+    ESP_LOGD(TAG, "TX %u octets", (unsigned)len);
+    ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, (uint16_t)len, ESP_LOG_DEBUG);
     /* Ecriture sans reponse, comme le client officiel. */
     rc = ble_gattc_write_no_rsp_flat(g_ble.conn_handle, g_ble.tx_val_handle,
                                      data, (uint16_t)len);

@@ -320,7 +320,9 @@ int tk_vcsec_decode(const uint8_t *buf, size_t len, tk_vcsec_rx *out)
 int tk_vcsec_status_to_err(const tk_vcsec_rx *rx)
 {
     if (rx->has_nominal_error) {
-        return TK_ERR_VEHICLE_FAULT;
+        /* Errors.GenericError_E : GENERICERROR_CLOSURES_OPEN = 2 */
+        return (rx->nominal_error == 2) ? TK_ERR_CLOSURES_OPEN
+                                        : TK_ERR_VEHICLE_FAULT;
     }
     if (!rx->has_command_status) {
         return TK_OK;

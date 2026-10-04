@@ -33,3 +33,9 @@ twister-out/
 *.swp
 *~
 Thumbs.db
+
+# --- Secrets ---
+# Le vrai VIN vit dans secrets/tk_secrets.h ; seul l'exemple est versionne.
+secrets/tk_secrets.h
+# Journal des essais sur vehicule : contient le VIN et la cle publique.
+essai-vehicule.log

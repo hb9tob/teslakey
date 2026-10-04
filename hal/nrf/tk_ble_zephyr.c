@@ -342,8 +342,12 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
     memcpy(peer.addr, addr->a.val, 6);
     peer.addr_type = addr->type;
     peer.rssi      = rssi;
+    /* Le nom arrive dans la reponse de scan (constate sur vehicule), dont
+     * le type ne dit rien de la connectabilite : on la suppose. Le HAL
+     * ESP32 fait mieux en memorisant l'advertisement d'origine. */
     peer.connectable = (adv_type == BT_GAP_ADV_TYPE_ADV_IND ||
-                        adv_type == BT_GAP_ADV_TYPE_ADV_DIRECT_IND)
+                        adv_type == BT_GAP_ADV_TYPE_ADV_DIRECT_IND ||
+                        adv_type == BT_GAP_ADV_TYPE_SCAN_RSP)
                        ? 1 : 0;
 
     tk_hal_nrf_lock();
@@ -372,7 +376,7 @@ static int ble_scan_start(void *ctx, const char *local_name,
     g_ble.target_name[TK_LOCAL_NAME_LEN] = '\0';
 
     memset(&params, 0, sizeof(params));
-    params.type     = BT_LE_SCAN_TYPE_PASSIVE;
+    params.type     = BT_LE_SCAN_TYPE_ACTIVE;  /* nom en reponse de scan */
     params.options  = BT_LE_SCAN_OPT_NONE;
     params.interval = BT_GAP_SCAN_FAST_INTERVAL;
     params.window   = BT_GAP_SCAN_FAST_WINDOW;

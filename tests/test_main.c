@@ -641,9 +641,8 @@ static void test_local_name(tk_crypto_if *cr)
      *   printf '<vin>' | openssl dgst -sha1
      * puis "S" + les 16 premiers chiffres hexadecimaux + "C".
      *
-     * Le second cas est le vehicule reellement cible ; il verifie aussi
-     * qu'un changement de VIN recalcule bien le nom. A remplacer par un
-     * VIN d'exemple si ce depot doit etre publie. */
+     * Deux VIN fictifs : le second verifie qu'un changement de VIN
+     * recalcule bien le nom. */
     static const struct {
         const char *vin;
         const char *expected;

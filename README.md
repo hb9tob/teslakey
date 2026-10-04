@@ -17,7 +17,7 @@ Soyons précis sur ce qui est vérifié et ce qui ne l'est pas.
 
 | Partie | État |
 |---|---|
-| Cœur protocolaire (`core/`) | **798 vérifications automatisées, 0 échec.** Compile sans aucun avertissement avec `-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wcast-qual` ; l'analyseur statique de clang ne signale rien. |
+| Cœur protocolaire (`core/`) | **844 vérifications automatisées, 0 échec.** Compile sans aucun avertissement avec `-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wcast-qual` ; l'analyseur statique de clang ne signale rien. |
 | Conformité crypto | Validée contre les **vecteurs de test officiels de Tesla** (ECDH P-256 avec secret à octet de tête nul, dérivation de clé publique, somme de contrôle des métadonnées) et les vecteurs HMAC de la RFC 4231. |
 | Crypto embarquée (`hal/common/`) | **Compilée et testée.** Le module mbedTLS, celui qui tournera réellement sur ESP32 et nRF, passe les mêmes vecteurs Tesla que la référence OpenSSL, s'accorde bit à bit avec elle (AES-GCM et ECDH croisés), et fait tourner toute la machine à états. Validé sur mbedTLS 3.6, la série qu'embarquent ESP-IDF v5 et le nRF Connect SDK. |
 | Bout en bout | 9 scénarios contre un véhicule simulé, rejoués sur les **deux** backends crypto : handshake, enchaînement ouvrir → conduire, tag falsifié, clé non appairée puis appairage, resynchronisation, réponse rejouée, déconnexion, échéances, persistance de la clé. |
@@ -25,7 +25,7 @@ Soyons précis sur ce qui est vérifié et ce qui ne l'est pas.
 | Exécution sur matériel | **Testé sur un Heltec WiFi LoRa 32 V3 (ESP32-S3)** : flashé après effacement complet, démarre, console série opérationnelle. Validé en vrai : génération de la clé P-256 par mbedTLS sur la puce, écriture puis relecture en NVS, repli sur le VIN de configuration, et **nom BLE calculé par le firmware identique à la référence OpenSSL**. |
 | HAL nRF (`hal/nrf/`) | **Écrit mais jamais compilé** — le nRF Connect SDK n'est pas installé sur cette machine. |
 | Compatibilité ESP-IDF 4.x | Les adaptations sont en place (API NimBLE et mbedTLS 2.x), mais **seul le chemin mbedTLS 3.x a été compilé**. Concerne PlatformIO : voir la section ESP32. |
-| Sur un vrai véhicule | **Jamais essayé.** |
+| Sur un vrai véhicule | **Essayé le 4 octobre 2026** avec le Heltec V3 : scan, connexion, appairage par carte NFC, session authentifiée, `unlock`, `lock`, `drive` acceptés. La clé survit à un redémarrage. Voir `TODO.md` pour ce que l'essai a corrigé. |
 
 Autrement dit : la partie difficile et piégeuse — la cryptographie et le
 format exact des messages — est testée, conforme aux vecteurs de Tesla, et
@@ -186,8 +186,12 @@ dégradation — le framing est écrit pour ça et c'est le cas testé.
 
 ### Première mise en service
 
-Le VIN est déjà configuré (`CONFIG_TESLAKEY_VIN`), il n'y a donc qu'une
-commande à taper dans le moniteur série :
+Le VIN ne se versionne pas. Copiez `secrets/tk_secrets.example.h` en
+`secrets/tk_secrets.h` (ignoré par git) et mettez-y le vôtre : il est
+compilé dans le firmware. Sans ce fichier, la compilation utilise un VIN
+fictif, à remplacer par la commande `vin` de la console.
+
+Il ne reste alors qu'une commande à taper dans le moniteur série :
 
 ```
 pair
@@ -196,14 +200,14 @@ pair
 Puis **posez votre carte NFC Tesla sur la console centrale** et confirmez à
 l'écran. Le véhicule doit être réveillé et vous à l'intérieur.
 
-Au démarrage, le firmware affiche le nom BLE qu'il recherche. Pour le VIN
-configuré, ce doit être `S57bfc47617573c4eC` — c'est le premier point à
-vérifier si le véhicule n'est jamais trouvé. La commande `vin <17
+Au démarrage, le firmware affiche le nom BLE qu'il recherche, dérivé du
+VIN. Si le véhicule n'est jamais trouvé alors qu'une ligne `autre Tesla en
+vue : S…C` apparaît, le VIN saisi est faux. La commande `vin <17
 caractères>` change de véhicule et rend le choix persistant en mémoire.
 
 Ensuite le bouton suffit : appui court pour ouvrir, appui long pour ouvrir
 et autoriser la conduite. Autres commandes : `unlock`, `lock`, `drive`,
-`trunk`, `status`, `help`.
+`trunk`, `frunk`, `chargeport`, `status`, `help`.
 
 ---
 
@@ -215,7 +219,8 @@ west build -b nrf52840dk/nrf52840
 west flash
 ```
 
-Le VIN est fourni à la compilation (`CONFIG_TESLAKEY_VIN` dans `Kconfig`),
+Le VIN est fourni à la compilation (`secrets/tk_secrets.h`, à défaut
+`CONFIG_TESLAKEY_VIN` dans `Kconfig`),
 la carte n'ayant pas forcément de console. Pour cibler un autre véhicule :
 
 ```sh
@@ -301,7 +306,7 @@ Une commande capturée en l'air ne peut pas être rejouée.
 
 ## Licence et responsabilité
 
-Ce code pilote un véhicule. Il n'a jamais été essayé sur une vraie voiture.
+Ce code pilote un véhicule. Il n'a été essayé que sur une seule voiture.
 Faites vos premiers essais à l'arrêt, dans un endroit sûr, et ne comptez pas
 dessus comme unique moyen d'accès avant de l'avoir éprouvé : gardez votre
 carte NFC sur vous.

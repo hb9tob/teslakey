@@ -48,6 +48,8 @@ extern "C" {
 #define TK_CONNECT_TIMEOUT_MS   10000
 #define TK_HANDSHAKE_TIMEOUT_MS  5000
 #define TK_COMMAND_TIMEOUT_MS    5000
+#define TK_ENROLL_TIMEOUT_MS    60000   /* le temps de presenter la carte NFC */
+#define TK_ENROLL_POLL_MS        2000
 
 typedef enum {
     TK_STATE_IDLE = 0,
@@ -67,6 +69,7 @@ typedef enum {
     TK_ACTION_WAKE,
     TK_ACTION_OPEN_TRUNK,
     TK_ACTION_OPEN_FRUNK,
+    TK_ACTION_OPEN_CHARGE_PORT,
 } tk_action;
 
 typedef struct {
